@@ -1,0 +1,82 @@
+#Workflow name
+name: CI Pipeline
+on:
+  #Manually trigger workflow runs
+  workflow_dispatch:
+  #Trigger the workflow on push from the main branch
+  push:
+    branches:
+      - main
+
+env:
+  APP_PORT: 8080
+  TEST_TAG: ayoubensalem/myapp:test
+
+jobs:
+  build:
+    name: Build
+    #Run on Ubuntu using the latest version
+    runs-on: ubuntu-20.04
+    #Job's steps
+    steps:
+      #Check-out your repository under $GITHUB_WORKSPACE, so your workflow can access it
+      - uses: actions/checkout@v3
+      #Set up JDK 17
+      - name: Set up JDK
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+      #Set up Maven cache
+      - name: Cache Maven dependencies
+        #This action allows caching dependencies and build outputs to improve workflow execution time.
+        uses: actions/cache@v1
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+      #Run Tests
+      - name: Run Unit Tests
+        run: mvn -B test
+      #Package 
+      - name: Package Application 
+        run: mvn -U package
+
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+      -
+        name: Build application docker image
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.TEST_TAG }}
+
+      - name: Run Application Container
+        run: docker run -d --name app --net host ${{ env.TEST_TAG }}
+
+      - name: Wait for application to start
+        run: ./wait-for-it.sh -t 120 localhost:${{ env.APP_PORT }}  -- echo "Application has started"
+      
+      - name: Run JVM Diagnosis Tool
+        run : docker exec app bash -c "/jdk/bin/java -jar arthas-boot.jar --attach-only --select application.jar"
+
+      - name: Run Vulnerability Tracer for 2 minutes
+        run : docker run -d --name tracer --net host -e TRACE_TIME=2 -v $(pwd)/pom.xml:/pom.xml -v /sys/kernel/debug:/sys/kernel/debug:rw -v /lib/modules/$(uname -r):/lib/modules/$(uname -r) -v /usr/src:/usr/src --privileged --pid container:app ayoubensalem/arvos-poc $(docker exec app pidof java) --pom /pom.xml --show-all
+
+      - name: Generate Workload - Heat UP Arthas
+        run: |
+          sleep 15
+          ./workload-generator.sh 
+
+      - name: Generate Workload - Collect stack traces
+        run: |
+          sleep 5
+          ./workload-generator.sh 
+
+      - name: Produce Report
+        run: | 
+          docker logs -f tracer
+          exit $(docker inspect tracer --format "{{.State.ExitCode}}")
